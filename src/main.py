@@ -32,10 +32,12 @@ def serve(path):
         return {"message": "API Backend SODATRA - Utilisez /api/optimization/*"}
 
 if __name__ == '__main__':
+    # Railway fournit le port via la variable d'environnement PORT
+    port = int(os.environ.get('PORT', 5000))
     print("=" * 60)
     print("🚀 Backend SODATRA démarré avec succès!")
     print("=" * 60)
-    print("📡 API disponible sur: http://localhost:5000/api/optimization")
-    print("💚 Health check: http://localhost:5000/health")
+    print(f"📡 API disponible sur: http://localhost:{port}/api/optimization")
+    print(f"💚 Health check: http://localhost:{port}/health")
     print("=" * 60)
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=port)
