@@ -417,3 +417,88 @@ def internal_error(e):
         'error': 'Erreur interne du serveur'
     }), 500
 
+
+
+@optimization_bp.route('/suggest-fleet', methods=['POST'])
+def suggest_fleet():
+    """
+    Suggère la meilleure combinaison de camions pour une packing list
+    
+    Request JSON:
+        {
+            "items": [...],
+            "distance_km": 450,
+            "available_trucks": ["truck_19t", "truck_26t", "truck_40t"],
+            "constraints": {...}
+        }
+    
+    Returns:
+        JSON avec plusieurs scénarios d'optimisation et recommandation
+    """
+    try:
+        from src.services.fleet_optimizer import FleetOptimizer
+        
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'error': 'Aucune donnée fournie'
+            }), 400
+        
+        # Extraction des paramètres
+        items_data = data.get('items', [])
+        distance_km = data.get('distance_km', 100)
+        available_trucks = data.get('available_trucks')
+        constraints = data.get('constraints', {})
+        
+        if not items_data:
+            return jsonify({
+                'success': False,
+                'error': 'Liste d\'articles vide'
+            }), 400
+        
+        # Convertir les données en objets Item
+        items = []
+        for item_data in items_data:
+            try:
+                item = Item(
+                    name=item_data.get('name', 'Article'),
+                    length=float(item_data.get('length', 0)),
+                    width=float(item_data.get('width', 0)),
+                    height=float(item_data.get('height', 0)),
+                    weight=float(item_data.get('weight', 0)),
+                    quantity=int(item_data.get('quantity', 1))
+                )
+                items.append(item)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Article invalide ignoré: {e}")
+                continue
+        
+        if not items:
+            return jsonify({
+                'success': False,
+                'error': 'Aucun article valide trouvé'
+            }), 400
+        
+        # Créer l'optimiseur de flotte
+        optimizer = FleetOptimizer(
+            items=items,
+            distance_km=distance_km,
+            available_trucks=available_trucks,
+            constraints=constraints
+        )
+        
+        # Générer les scénarios
+        result = optimizer.suggest_scenarios()
+        
+        logger.info(f"Scénarios générés avec succès: {len(result.get('scenarios', []))} scénarios")
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Erreur lors de la suggestion de flotte: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': f'Erreur lors de la suggestion de flotte: {str(e)}'
+        }), 500
