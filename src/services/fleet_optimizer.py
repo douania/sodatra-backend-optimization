@@ -4,6 +4,7 @@ Module d'optimisation de flotte multi-camions
 
 import random
 import copy
+import math
 from typing import List, Dict, Tuple
 from src.models.item import Item
 from src.services.cost_calculator import CostCalculator
@@ -51,12 +52,6 @@ class FleetOptimizer:
                  available_trucks: List[str] = None, constraints: dict = None):
         """
         Initialise l'optimiseur de flotte
-        
-        Args:
-            items: Liste des articles à transporter
-            distance_km: Distance du transport
-            available_trucks: Liste des types de camions disponibles
-            constraints: Contraintes additionnelles
         """
         self.items = items
         self.distance_km = distance_km
@@ -77,7 +72,8 @@ class FleetOptimizer:
         max_single_weight = 0
         
         for item in self.items:
-            item_volume = (item.length * item.width * item.height) / 1_000_000  # m³
+            # Volume en m3 (dimensions en cm)
+            item_volume = (item.length * item.width * item.height) / 1_000_000
             total_volume += item_volume * item.quantity
             total_weight += item.weight * item.quantity
             
@@ -102,7 +98,6 @@ class FleetOptimizer:
         }
     
     def _count_oversized_items(self) -> int:
-        """Compte les articles surdimensionnés"""
         count = 0
         for item in self.items:
             if (item.length > 1200 or item.width > 240 or item.height > 270):
@@ -110,7 +105,6 @@ class FleetOptimizer:
         return count
     
     def _count_heavy_items(self) -> int:
-        """Compte les articles très lourds (> 5 tonnes)"""
         count = 0
         for item in self.items:
             if item.weight > 5000:
@@ -118,15 +112,11 @@ class FleetOptimizer:
         return count
     
     def _filter_compatible_trucks(self) -> List[str]:
-        """Filtre les camions compatibles avec les dimensions des articles"""
         compatible = []
-        
         max_dims = self.analysis['max_dimensions']
         
         for truck_type in self.available_trucks:
             truck = self.TRUCK_SPECS[truck_type]
-            
-            # Vérifier si les dimensions max rentrent
             if (max_dims['length'] <= truck['length'] and
                 max_dims['width'] <= truck['width'] and
                 max_dims['height'] <= truck['height'] and
@@ -136,32 +126,22 @@ class FleetOptimizer:
         return compatible if compatible else self.available_trucks
     
     def suggest_scenarios(self) -> dict:
-        """
-        Génère plusieurs scénarios d'optimisation
-        
-        Returns:
-            dict avec liste de scénarios et recommandation
-        """
         compatible_trucks = self._filter_compatible_trucks()
-        
         scenarios = []
         
-        # Scénario 1 : Optimisation coût (utilise des camions moyens)
+        # Scénario 1 : Coût Optimal
         scenario_cost = self._optimize_for_cost(compatible_trucks)
-        if scenario_cost:
-            scenarios.append(scenario_cost)
+        if scenario_cost: scenarios.append(scenario_cost)
         
-        # Scénario 2 : Nombre minimal de camions (utilise les plus gros)
+        # Scénario 2 : Nombre Minimal
         scenario_min = self._optimize_for_truck_count(compatible_trucks)
-        if scenario_min:
-            scenarios.append(scenario_min)
+        if scenario_min: scenarios.append(scenario_min)
         
-        # Scénario 3 : Équilibré (compromis)
+        # Scénario 3 : Équilibré
         scenario_balanced = self._optimize_balanced(compatible_trucks)
-        if scenario_balanced:
-            scenarios.append(scenario_balanced)
+        if scenario_balanced: scenarios.append(scenario_balanced)
         
-        # Calculer les coûts pour chaque scénario
+        # Calculer les coûts
         for scenario in scenarios:
             cost_details = self.cost_calculator.calculate_scenario_cost(
                 scenario['trucks'],
@@ -171,7 +151,6 @@ class FleetOptimizer:
             scenario['cost_details'] = cost_details
             scenario['total_cost'] = cost_details['total_cost']
         
-        # Identifier le scénario recommandé
         comparison = self.cost_calculator.compare_scenarios(scenarios)
         recommended_id = comparison.get('recommendation', scenarios[0]['id'] if scenarios else None)
         
@@ -183,156 +162,34 @@ class FleetOptimizer:
             "compatible_trucks": compatible_trucks,
             "comparison": comparison
         }
-    
-    def _optimize_for_cost(self, compatible_trucks: List[str]) -> dict:
-        """Optimise pour minimiser le coût total"""
-        # Stratégie : Utiliser des camions de taille moyenne pour équilibrer
-        # le nombre de camions et le coût unitaire
-        
-        # Trier par rapport coût/capacité
-        truck_efficiency = []
-        for truck_type in compatible_trucks:
-            truck = self.TRUCK_SPECS[truck_type]
-            cost_info = self.cost_calculator.TRUCK_COSTS[truck_type]
-            efficiency = truck['volume'] / (cost_info['fixed'] + cost_info['per_km'] * self.distance_km)
-            truck_efficiency.append((truck_type, efficiency, truck['volume'], truck['max_weight']))
-        
-        # Trier par efficacité décroissante
-        truck_efficiency.sort(key=lambda x: x[1], reverse=True)
-        
-        # Allouer les articles aux camions
-        trucks_needed = self._allocate_items_to_trucks(truck_efficiency)
-        
-        if not trucks_needed:
-            return None
-        
-        total_trucks = sum(t['quantity'] for t in trucks_needed)
-        avg_fill = sum(t['fill_rate'] for t in trucks_needed) / len(trucks_needed) if trucks_needed else 0
-        
-        return {
-            "id": "scenario_cost_optimal",
-            "name": "Coût Optimal",
-            "description": "Minimise le coût total du transport en optimisant le rapport coût/capacité",
-            "trucks": trucks_needed,
-            "total_trucks": total_trucks,
-            "average_fill_rate": round(avg_fill, 2),
-            "estimated_duration_days": self._estimate_duration(total_trucks),
-            "legal_compliance": True,
-            "warnings": []
-        }
-    
-    def _optimize_for_truck_count(self, compatible_trucks: List[str]) -> dict:
-        """Optimise pour minimiser le nombre de camions"""
-        # Stratégie : Utiliser les plus gros camions disponibles
-        
-        # Trier par capacité décroissante
-        sorted_trucks = sorted(
-            compatible_trucks,
-            key=lambda t: self.TRUCK_SPECS[t]['volume'],
-            reverse=True
-        )
-        
-        # Utiliser principalement les plus gros
-        truck_priority = [(t, 0, self.TRUCK_SPECS[t]['volume'], self.TRUCK_SPECS[t]['max_weight']) 
-                         for t in sorted_trucks]
-        
-        trucks_needed = self._allocate_items_to_trucks(truck_priority)
-        
-        if not trucks_needed:
-            return None
-        
-        total_trucks = sum(t['quantity'] for t in trucks_needed)
-        avg_fill = sum(t['fill_rate'] for t in trucks_needed) / len(trucks_needed) if trucks_needed else 0
-        
-        warnings = []
-        if avg_fill > 0.95:
-            warnings.append("Taux de remplissage très élevé - marge de sécurité réduite")
-        
-        return {
-            "id": "scenario_min_trucks",
-            "name": "Nombre Minimal de Camions",
-            "description": "Utilise le moins de camions possible en maximisant le remplissage",
-            "trucks": trucks_needed,
-            "total_trucks": total_trucks,
-            "average_fill_rate": round(avg_fill, 2),
-            "estimated_duration_days": self._estimate_duration(total_trucks),
-            "legal_compliance": True,
-            "warnings": warnings
-        }
-    
-    def _optimize_balanced(self, compatible_trucks: List[str]) -> dict:
-        """Compromis entre coût et nombre de camions"""
-        # Stratégie : Mix de camions moyens et gros
-        
-        # Utiliser une combinaison équilibrée
-        truck_mix = []
-        for truck_type in compatible_trucks:
-            truck = self.TRUCK_SPECS[truck_type]
-            # Score équilibré : volume * 0.6 + (1/coût) * 0.4
-            cost_info = self.cost_calculator.TRUCK_COSTS[truck_type]
-            cost_score = 1 / (cost_info['fixed'] + cost_info['per_km'] * self.distance_km)
-            score = truck['volume'] * 0.6 + cost_score * 1000000 * 0.4
-            truck_mix.append((truck_type, score, truck['volume'], truck['max_weight']))
-        
-        truck_mix.sort(key=lambda x: x[1], reverse=True)
-        
-        trucks_needed = self._allocate_items_to_trucks(truck_mix)
-        
-        if not trucks_needed:
-            return None
-        
-        total_trucks = sum(t['quantity'] for t in trucks_needed)
-        avg_fill = sum(t['fill_rate'] for t in trucks_needed) / len(trucks_needed) if trucks_needed else 0
-        
-        return {
-            "id": "scenario_balanced",
-            "name": "Équilibré",
-            "description": "Compromis optimal entre coût, nombre de camions et sécurité",
-            "trucks": trucks_needed,
-            "total_trucks": total_trucks,
-            "average_fill_rate": round(avg_fill, 2),
-            "estimated_duration_days": self._estimate_duration(total_trucks),
-            "legal_compliance": True,
-            "warnings": []
-        }
-    
+
     def _allocate_items_to_trucks(self, truck_priority: List[Tuple]) -> List[dict]:
-        """
-        Alloue les articles aux camions selon une priorité donnée
-        
-        Args:
-            truck_priority: Liste de (truck_type, score, volume, max_weight)
-        
-        Returns:
-            Liste de camions nécessaires avec leurs caractéristiques
-        """
+        """Logique d'allocation corrigée et réaliste"""
         remaining_volume = self.analysis['total_volume_m3']
         remaining_weight = self.analysis['total_weight_kg']
         
+        # Facteur de sécurité pour le remplissage (on ne remplit jamais à 100% en réel)
+        SAFETY_FACTOR = 0.85 
+        
         trucks_needed = {}
         
-        # Allouer itérativement
-        while remaining_volume > 0.01 or remaining_weight > 0:
-            # Choisir le meilleur camion disponible
-            best_truck = None
-            for truck_type, _, volume, max_weight in truck_priority:
-                if volume > 0 and max_weight > 0:
-                    best_truck = truck_type
-                    break
+        # Tant qu'il reste de la marchandise
+        while remaining_volume > 0.05 or remaining_weight > 10:
+            # Trouver le meilleur camion dans la liste de priorité
+            best_truck_type = truck_priority[0][0]
+            truck_spec = self.TRUCK_SPECS[best_truck_type]
             
-            if not best_truck:
-                break
+            # Capacité utile avec facteur de sécurité
+            usable_volume = truck_spec['volume'] * SAFETY_FACTOR
+            usable_weight = truck_spec['max_weight'] * SAFETY_FACTOR
             
-            truck_spec = self.TRUCK_SPECS[best_truck]
+            # Combien ce camion prend-il ?
+            vol_to_take = min(remaining_volume, usable_volume)
+            weight_to_take = min(remaining_weight, usable_weight)
             
-            # Calculer combien ce camion peut prendre
-            volume_taken = min(remaining_volume, truck_spec['volume'])
-            weight_taken = min(remaining_weight, truck_spec['max_weight'])
-            
-            # Ajouter ce camion
-            if best_truck not in trucks_needed:
-                trucks_needed[best_truck] = {
-                    "type": best_truck,
+            if best_truck_type not in trucks_needed:
+                trucks_needed[best_truck_type] = {
+                    "type": best_truck_type,
                     "name": truck_spec['name'],
                     "quantity": 0,
                     "volume_used": 0,
@@ -341,34 +198,79 @@ class FleetOptimizer:
                     "weight_capacity": truck_spec['max_weight']
                 }
             
-            trucks_needed[best_truck]['quantity'] += 1
-            trucks_needed[best_truck]['volume_used'] += volume_taken
-            trucks_needed[best_truck]['weight_used'] += weight_taken
+            trucks_needed[best_truck_type]['quantity'] += 1
+            trucks_needed[best_truck_type]['volume_used'] += vol_to_take
+            trucks_needed[best_truck_type]['weight_used'] += weight_to_take
             
-            remaining_volume -= volume_taken
-            remaining_weight -= weight_taken
+            remaining_volume -= vol_to_take
+            remaining_weight -= weight_to_take
             
-            # Sécurité : éviter boucle infinie
-            if trucks_needed[best_truck]['quantity'] > 100:
+            # Sécurité anti-boucle
+            if sum(t['quantity'] for t in trucks_needed.values()) > 50:
                 break
-        
-        # Calculer les taux de remplissage
+                
         result = []
-        for truck_data in trucks_needed.values():
-            volume_fill = truck_data['volume_used'] / (truck_data['volume_capacity'] * truck_data['quantity'])
-            weight_fill = truck_data['weight_used'] / (truck_data['weight_capacity'] * truck_data['quantity'])
+        for t in trucks_needed.values():
+            # Taux de remplissage par camion individuel
+            v_fill = (t['volume_used'] / t['quantity']) / t['volume_capacity']
+            w_fill = (t['weight_used'] / t['quantity']) / t['weight_capacity']
+            t['fill_rate'] = round(max(v_fill, w_fill), 2)
+            result.append(t)
             
-            truck_data['fill_rate'] = min(volume_fill, weight_fill)
-            truck_data['volume_fill_rate'] = volume_fill
-            truck_data['weight_fill_rate'] = weight_fill
-            
-            result.append(truck_data)
-        
         return result
-    
-    def _estimate_duration(self, truck_count: int) -> float:
-        """Estime la durée du transport en jours"""
-        # Formule simple : 1 jour de base + 0.5 jour par camion additionnel
-        base_days = 1
-        additional_days = (truck_count - 1) * 0.5
-        return round(base_days + additional_days, 1)
+
+    def _optimize_for_cost(self, compatible_trucks: List[str]) -> dict:
+        truck_efficiency = []
+        for t in compatible_trucks:
+            truck = self.TRUCK_SPECS[t]
+            cost = self.cost_calculator.TRUCK_COSTS[t]['fixed'] + (self.cost_calculator.TRUCK_COSTS[t]['per_km'] * self.distance_km)
+            efficiency = truck['volume'] / cost
+            truck_efficiency.append((t, efficiency))
+        
+        truck_efficiency.sort(key=lambda x: x[1], reverse=True)
+        trucks = self._allocate_items_to_trucks(truck_efficiency)
+        
+        return {
+            "id": "scenario_cost_optimal",
+            "name": "Coût Optimal",
+            "description": "Minimise le coût total du transport",
+            "trucks": trucks,
+            "total_trucks": sum(t['quantity'] for t in trucks),
+            "average_fill_rate": sum(t['fill_rate'] for t in trucks) / len(trucks) if trucks else 0,
+            "estimated_duration_days": 1
+        }
+
+    def _optimize_for_truck_count(self, compatible_trucks: List[str]) -> dict:
+        truck_vol = [(t, self.TRUCK_SPECS[t]['volume']) for t in compatible_trucks]
+        truck_vol.sort(key=lambda x: x[1], reverse=True)
+        trucks = self._allocate_items_to_trucks(truck_vol)
+        
+        return {
+            "id": "scenario_min_trucks",
+            "name": "Nombre Minimal",
+            "description": "Utilise les plus gros camions",
+            "trucks": trucks,
+            "total_trucks": sum(t['quantity'] for t in trucks),
+            "average_fill_rate": sum(t['fill_rate'] for t in trucks) / len(trucks) if trucks else 0,
+            "estimated_duration_days": 1
+        }
+
+    def _optimize_balanced(self, compatible_trucks: List[str]) -> dict:
+        # Priorité au camion 26t ou 40t si disponible
+        priority = []
+        for t in compatible_trucks:
+            score = 100 if t in ['truck_26t', 'truck_40t'] else 50
+            priority.append((t, score))
+        
+        priority.sort(key=lambda x: x[1], reverse=True)
+        trucks = self._allocate_items_to_trucks(priority)
+        
+        return {
+            "id": "scenario_balanced",
+            "name": "Équilibré",
+            "description": "Compromis coût et sécurité",
+            "trucks": trucks,
+            "total_trucks": sum(t['quantity'] for t in trucks),
+            "average_fill_rate": sum(t['fill_rate'] for t in trucks) / len(trucks) if trucks else 0,
+            "estimated_duration_days": 1
+        }
