@@ -460,15 +460,22 @@ def suggest_fleet():
         
         # Convertir les données en objets Item
         items = []
-        for item_data in items_data:
+        for idx, item_data in enumerate(items_data):
             try:
+                # Récupérer la référence depuis 'id', 'reference', 'name' ou générer une
+                reference = item_data.get('id') or item_data.get('reference') or item_data.get('name') or f'ITEM_{idx+1}'
+                description = item_data.get('description') or item_data.get('name') or f'Article {idx+1}'
+                
                 item = Item(
-                    name=item_data.get('name', 'Article'),
+                    reference=str(reference),
+                    description=str(description),
                     length=float(item_data.get('length', 0)),
                     width=float(item_data.get('width', 0)),
                     height=float(item_data.get('height', 0)),
                     weight=float(item_data.get('weight', 0)),
-                    quantity=int(item_data.get('quantity', 1))
+                    quantity=int(item_data.get('quantity', 1)),
+                    fragile=bool(item_data.get('fragile', False)),
+                    stackable=bool(item_data.get('stackable', True))
                 )
                 items.append(item)
             except (ValueError, TypeError) as e:
