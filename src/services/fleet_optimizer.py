@@ -41,12 +41,15 @@ class FleetOptimizer:
     }
     
     def __init__(self, items: List[Item], destination: str = "dakar_local", 
-                 available_trucks: List[str] = None):
+                 available_trucks: List[str] = None, distance_km: float = None,
+                 constraints: dict = None):
         self.items = items
         self.dest_key = destination if destination in self.DESTINATIONS else "dakar_local"
         self.destination = self.DESTINATIONS[self.dest_key]
-        self.distance_km = self.destination["distance"]
+        # Utiliser distance_km fourni ou celle de la destination
+        self.distance_km = distance_km if distance_km is not None else self.destination["distance"]
         self.available_trucks = available_trucks or list(self.TRUCK_SPECS.keys())
+        self.constraints = constraints or {}
         self.analysis = self._analyze_items()
     
     def _analyze_items(self) -> dict:
