@@ -42,7 +42,21 @@ class Item:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Item':
         """Création depuis un dictionnaire"""
-        return cls(**data)
+        # Mapper les champs du frontend vers les champs du backend
+        mapped_data = {
+            'length': float(data.get('length', 0)),
+            'width': float(data.get('width', 0)),
+            'height': float(data.get('height', 0)),
+            'weight': float(data.get('weight', 0)),
+            'quantity': int(data.get('quantity', 1)),
+            'id': str(data.get('id', '')),
+            'reference': str(data.get('reference', data.get('id', ''))),
+            'description': str(data.get('description', data.get('name', ''))),
+            'fragile': bool(data.get('fragile', False)),
+            'stackable': bool(data.get('stackable', True)),
+            'max_stack_height': data.get('max_stack_height')
+        }
+        return cls(**mapped_data)
 
 @dataclass
 class TruckSpecs:
