@@ -222,13 +222,14 @@ class ExcelExtractor:
                 weight = self._convert_weight(weight, column_mapping.get('weight'))
                 
                 item = Item(
-                    reference=reference,
-                    description=description,
                     length=length,
                     width=width,
                     height=height,
                     weight=weight,
                     quantity=quantity,
+                    id=reference,
+                    reference=reference,
+                    description=description,
                     fragile=fragile,
                     stackable=stackable
                 )

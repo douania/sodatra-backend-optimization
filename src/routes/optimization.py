@@ -467,13 +467,14 @@ def suggest_fleet():
                 description = item_data.get('description') or item_data.get('name') or f'Article {idx+1}'
                 
                 item = Item(
-                    reference=str(reference),
-                    description=str(description),
                     length=float(item_data.get('length', 0)),
                     width=float(item_data.get('width', 0)),
                     height=float(item_data.get('height', 0)),
                     weight=float(item_data.get('weight', 0)),
                     quantity=int(item_data.get('quantity', 1)),
+                    id=str(item_data.get('id', f'ITEM_{idx+1}')),
+                    reference=str(reference),
+                    description=str(description),
                     fragile=bool(item_data.get('fragile', False)),
                     stackable=bool(item_data.get('stackable', True))
                 )

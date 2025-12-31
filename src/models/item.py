@@ -8,13 +8,14 @@ import json
 @dataclass
 class Item:
     """Représente un article à charger"""
-    reference: str
-    description: str
     length: float  # cm
     width: float   # cm
     height: float  # cm
     weight: float  # kg
     quantity: int
+    id: Optional[str] = None  # Identifiant unique de l'item
+    reference: str = ""
+    description: str = ""
     fragile: bool = False
     stackable: bool = True
     max_stack_height: Optional[float] = None
