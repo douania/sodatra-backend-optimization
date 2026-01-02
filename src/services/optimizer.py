@@ -1,421 +1,381 @@
-"""
-Service d'optimisation de chargement avec algorithmes génétiques
-"""
+# src/services/optimizer.py
+from __future__ import annotations
+
+from typing import List, Tuple, Dict, Any, Optional
 import random
 import time
-import copy
-from typing import List, Tuple, Optional, Dict, Any
-import numpy as np
-from dataclasses import dataclass
-import logging
-from src.models.item import Item, TruckSpecs, Placement, OptimizationResult, AlgorithmConfig
+import math
 
-logger = logging.getLogger(__name__)
+from src.models.item import Item, TruckSpecs, Placement, AlgorithmConfig
 
-@dataclass
-class Individual:
-    """Individu dans l'algorithme génétique"""
-    placements: List[Placement]
-    fitness: float = 0.0
-    valid: bool = True
 
 class LoadingOptimizer:
-    """Optimiseur de chargement de camions plateaux"""
-    
-    def __init__(self):
-        self.items = []
-        self.truck_specs = None
-        self.config = AlgorithmConfig()
-    
-    def optimize(self, items: List[Item], truck_specs: TruckSpecs, 
-                config: AlgorithmConfig) -> OptimizationResult:
-        """
-        Lance l'optimisation du chargement
-        
-        Args:
-            items: Liste des articles à charger
-            truck_specs: Spécifications du camion
-            config: Configuration de l'algorithme
-            
-        Returns:
-            Résultat de l'optimisation
-        """
-        self.items = items
-        self.truck_specs = truck_specs
-        self.config = config
-        
-        start_time = time.time()
-        
-        try:
-            if config.algorithm == "simple":
-                result = self._optimize_simple()
-            elif config.algorithm == "genetic":
-                result = self._optimize_genetic()
-            else:
-                raise ValueError(f"Algorithme inconnu: {config.algorithm}")
-            
-            result.computation_time = time.time() - start_time
-            result.algorithm_used = config.algorithm
-            result.truck_specs = truck_specs
-            
-            logger.info(f"Optimisation terminée en {result.computation_time:.2f}s")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Erreur lors de l'optimisation: {str(e)}")
-            return OptimizationResult(
-                success=False,
-                items_placed=0,
-                items_total=sum(item.quantity for item in items),
-                weight_efficiency=0.0,
-                volume_efficiency=0.0,
-                error_message=str(e),
-                computation_time=time.time() - start_time,
-                algorithm_used=config.algorithm
-            )
-    
-    def _optimize_simple(self) -> OptimizationResult:
-        """Algorithme simple First Fit Decreasing"""
-        # Expansion des articles selon leur quantité
-        expanded_items = []
-        for item in self.items:
-            for i in range(item.quantity):
-                expanded_items.append((item, i))
-        
-        # Tri par volume décroissant
-        expanded_items.sort(key=lambda x: x[0].volume, reverse=True)
-        
-        placements = []
-        placed_weight = 0.0
-        placed_volume = 0.0
-        
-        # Placement séquentiel
-        for item, instance in expanded_items:
-            position = self._find_first_fit_position(item, placements)
-            if position and placed_weight + item.weight <= self.truck_specs.max_weight:
-                placement = Placement(
-                    item_id=f"{item.reference}_{instance}",
-                    x=position[0],
-                    y=position[1],
-                    z=position[2],
-                    length=item.length,
-                    width=item.width,
-                    height=item.height
-                )
-                placements.append(placement)
-                placed_weight += item.weight
-                placed_volume += item.volume
-        
-        # Calcul des métriques
-        total_items = sum(item.quantity for item in self.items)
-        weight_efficiency = (placed_weight / self.truck_specs.max_weight) * 100
-        volume_efficiency = (placed_volume / self.truck_specs.volume) * 100
-        
-        return OptimizationResult(
-            success=True,
-            items_placed=len(placements),
-            items_total=total_items,
-            weight_efficiency=weight_efficiency,
-            volume_efficiency=volume_efficiency,
-            placements=placements
-        )
-    
-    def _find_first_fit_position(self, item: Item, existing_placements: List[Placement]) -> Optional[Tuple[float, float, float]]:
-        """Trouve la première position disponible pour un article"""
-        # Grille de positions possibles
-        step = 10  # Précision de 10cm
-        
-        for z in range(0, int(self.truck_specs.height - item.height) + 1, step):
-            for y in range(0, int(self.truck_specs.width - item.width) + 1, step):
-                for x in range(0, int(self.truck_specs.length - item.length) + 1, step):
-                    position = (float(x), float(y), float(z))
-                    
-                    # Vérification des collisions
-                    if not self._check_collision(item, position, existing_placements):
-                        # Vérification du support (sauf au sol)
-                        if z == 0 or self._check_support(item, position, existing_placements):
-                            return position
-        
-        return None
-    
-    def _check_collision(self, item: Item, position: Tuple[float, float, float], 
-                        existing_placements: List[Placement]) -> bool:
-        """Vérifie s'il y a collision avec les articles existants"""
-        x, y, z = position
-        
-        for placement in existing_placements:
-            # Vérification de chevauchement 3D
-            if (x < placement.x + placement.length and x + item.length > placement.x and
-                y < placement.y + placement.width and y + item.width > placement.y and
-                z < placement.z + placement.height and z + item.height > placement.z):
-                return True
-        
-        return False
-    
-    def _check_support(self, item: Item, position: Tuple[float, float, float],
-                      existing_placements: List[Placement]) -> bool:
-        """Vérifie si l'article a un support suffisant"""
-        x, y, z = position
-        support_area = 0.0
-        item_base_area = item.length * item.width
-        
-        for placement in existing_placements:
-            # L'article doit être juste au-dessus
-            if abs(placement.z + placement.height - z) < 1.0:  # Tolérance 1cm
-                # Calcul de l'intersection des bases
-                overlap_x = max(0, min(x + item.length, placement.x + placement.length) - max(x, placement.x))
-                overlap_y = max(0, min(y + item.width, placement.y + placement.width) - max(y, placement.y))
-                support_area += overlap_x * overlap_y
-        
-        # Au moins 50% de support requis
-        return support_area >= item_base_area * 0.5
-    
-    def _optimize_genetic(self) -> OptimizationResult:
-        """Algorithme génétique d'optimisation"""
-        # Expansion des articles
-        expanded_items = []
-        for item in self.items:
-            for i in range(item.quantity):
-                expanded_items.append((item, f"{item.reference}_{i}"))
-        
-        # Initialisation de la population
-        population = self._initialize_population(expanded_items)
-        
-        best_individual = None
-        best_fitness = -float('inf')
-        generations_without_improvement = 0
-        
-        for generation in range(self.config.generations):
-            # Évaluation de la population
-            for individual in population:
-                individual.fitness = self._evaluate_fitness(individual)
-                if individual.fitness > best_fitness:
-                    best_fitness = individual.fitness
-                    best_individual = copy.deepcopy(individual)
-                    generations_without_improvement = 0
-                else:
-                    generations_without_improvement += 1
-            
-            # Arrêt précoce si pas d'amélioration
-            if generations_without_improvement > 20:
-                logger.info(f"Arrêt précoce à la génération {generation}")
-                break
-            
-            # Tri par fitness
-            population.sort(key=lambda x: x.fitness, reverse=True)
-            
-            # Nouvelle génération
-            new_population = []
-            
-            # Élitisme
-            elite_size = int(len(population) * self.config.elitism_rate)
-            new_population.extend(population[:elite_size])
-            
-            # Croisement et mutation
-            while len(new_population) < self.config.population_size:
-                parent1 = self._tournament_selection(population)
-                parent2 = self._tournament_selection(population)
-                
-                if random.random() < self.config.crossover_rate:
-                    child = self._crossover(parent1, parent2, expanded_items)
-                else:
-                    child = copy.deepcopy(parent1)
-                
-                if random.random() < self.config.mutation_rate:
-                    child = self._mutate(child, expanded_items)
-                
-                new_population.append(child)
-            
-            population = new_population
-            
-            if generation % 10 == 0:
-                logger.info(f"Génération {generation}: Meilleur fitness = {best_fitness:.4f}")
-        
-        # Construction du résultat
-        if best_individual:
-            total_items = sum(item.quantity for item in self.items)
-            placed_weight = sum(self._get_item_weight(p.item_id, expanded_items) for p in best_individual.placements)
-            placed_volume = sum(p.length * p.width * p.height for p in best_individual.placements)
-            
-            weight_efficiency = (placed_weight / self.truck_specs.max_weight) * 100
-            volume_efficiency = (placed_volume / self.truck_specs.volume) * 100
-            
-            return OptimizationResult(
-                success=True,
-                items_placed=len(best_individual.placements),
-                items_total=total_items,
-                weight_efficiency=weight_efficiency,
-                volume_efficiency=volume_efficiency,
-                fitness=best_fitness,
-                placements=best_individual.placements
-            )
-        else:
-            return OptimizationResult(
-                success=False,
-                items_placed=0,
-                items_total=sum(item.quantity for item in self.items),
-                weight_efficiency=0.0,
-                volume_efficiency=0.0,
-                error_message="Aucune solution trouvée"
-            )
-    
-    def _initialize_population(self, expanded_items: List[Tuple[Item, str]]) -> List[Individual]:
-        """Initialise la population avec des solutions aléatoires"""
-        population = []
-        
-        for _ in range(self.config.population_size):
-            # Mélange aléatoire des articles
-            shuffled_items = expanded_items.copy()
-            random.shuffle(shuffled_items)
-            
-            placements = []
-            placed_weight = 0.0
-            
-            for item, item_id in shuffled_items:
-                if placed_weight + item.weight > self.truck_specs.max_weight:
-                    continue
-                
-                position = self._find_random_position(item, placements)
-                if position:
-                    placement = Placement(
-                        item_id=item_id,
-                        x=position[0],
-                        y=position[1],
-                        z=position[2],
-                        length=item.length,
-                        width=item.width,
-                        height=item.height
-                    )
-                    placements.append(placement)
-                    placed_weight += item.weight
-            
-            individual = Individual(placements=placements)
-            population.append(individual)
-        
-        return population
-    
-    def _find_random_position(self, item: Item, existing_placements: List[Placement]) -> Optional[Tuple[float, float, float]]:
-        """Trouve une position aléatoire valide pour un article"""
-        max_attempts = 50
-        
-        for _ in range(max_attempts):
-            x = random.uniform(0, max(0, self.truck_specs.length - item.length))
-            y = random.uniform(0, max(0, self.truck_specs.width - item.width))
-            z = random.uniform(0, max(0, self.truck_specs.height - item.height))
-            
-            position = (x, y, z)
-            
-            if not self._check_collision(item, position, existing_placements):
-                if z < 10 or self._check_support(item, position, existing_placements):
-                    return position
-        
-        return None
-    
-    def _evaluate_fitness(self, individual: Individual) -> float:
-        """Évalue la fitness d'un individu"""
-        if not individual.placements:
-            return 0.0
-        
-        # Métriques de base
-        placed_weight = sum(self._get_placement_weight(p) for p in individual.placements)
-        placed_volume = sum(p.length * p.width * p.height for p in individual.placements)
-        
-        weight_ratio = placed_weight / self.truck_specs.max_weight
-        volume_ratio = placed_volume / self.truck_specs.volume
-        
-        # Fitness multi-objectifs
-        fitness = (
-            len(individual.placements) * 0.4 +  # Nombre d'articles placés
-            volume_ratio * 100 * 0.3 +          # Efficacité volumétrique
-            weight_ratio * 100 * 0.3            # Efficacité pondérale
-        )
-        
-        # Pénalités
-        fitness -= self._calculate_penalties(individual)
-        
-        return fitness
-    
-    def _calculate_penalties(self, individual: Individual) -> float:
-        """Calcule les pénalités pour les contraintes violées"""
-        penalty = 0.0
-        
-        # Pénalité pour centre de gravité trop haut
-        if individual.placements:
-            avg_height = sum(p.z + p.height/2 for p in individual.placements) / len(individual.placements)
-            if avg_height > self.truck_specs.height * 0.6:
-                penalty += 10.0
-        
-        # Pénalité pour instabilité (articles lourds en hauteur)
-        for placement in individual.placements:
-            weight = self._get_placement_weight(placement)
-            if placement.z > 100 and weight > 50:  # Articles lourds (>50kg) en hauteur (>1m)
-                penalty += weight * 0.1
-        
-        return penalty
-    
-    def _get_placement_weight(self, placement: Placement) -> float:
-        """Récupère le poids d'un placement"""
-        # Extraction de la référence depuis l'ID
-        ref = placement.item_id.split('_')[0]
-        for item in self.items:
-            if item.reference == ref:
-                return item.weight
-        return 0.0
-    
-    def _get_item_weight(self, item_id: str, expanded_items: List[Tuple[Item, str]]) -> float:
-        """Récupère le poids d'un article par son ID"""
-        for item, id_str in expanded_items:
-            if id_str == item_id:
-                return item.weight
-        return 0.0
-    
-    def _tournament_selection(self, population: List[Individual], tournament_size: int = 3) -> Individual:
-        """Sélection par tournoi"""
-        tournament = random.sample(population, min(tournament_size, len(population)))
-        return max(tournament, key=lambda x: x.fitness)
-    
-    def _crossover(self, parent1: Individual, parent2: Individual, 
-                  expanded_items: List[Tuple[Item, str]]) -> Individual:
-        """Croisement entre deux parents"""
-        # Croisement simple : prendre une partie de chaque parent
-        crossover_point = len(parent1.placements) // 2
-        
-        child_placements = parent1.placements[:crossover_point]
-        
-        # Ajouter des placements du parent2 qui ne créent pas de collision
-        for placement in parent2.placements:
-            item = self._find_item_by_id(placement.item_id, expanded_items)
-            if item and not self._check_collision(item, (placement.x, placement.y, placement.z), child_placements):
-                child_placements.append(placement)
-        
-        return Individual(placements=child_placements)
-    
-    def _mutate(self, individual: Individual, expanded_items: List[Tuple[Item, str]]) -> Individual:
-        """Mutation d'un individu"""
-        if not individual.placements:
-            return individual
-        
-        # Mutation : déplacer un article aléatoirement
-        if random.random() < 0.5 and individual.placements:
-            placement_idx = random.randint(0, len(individual.placements) - 1)
-            placement = individual.placements[placement_idx]
-            
-            item = self._find_item_by_id(placement.item_id, expanded_items)
-            if item:
-                # Supprimer temporairement le placement
-                temp_placements = individual.placements[:placement_idx] + individual.placements[placement_idx+1:]
-                
-                # Trouver une nouvelle position
-                new_position = self._find_random_position(item, temp_placements)
-                if new_position:
-                    placement.x, placement.y, placement.z = new_position
-        
-        return individual
-    
-    def _find_item_by_id(self, item_id: str, expanded_items: List[Tuple[Item, str]]) -> Optional[Item]:
-        """Trouve un article par son ID"""
-        for item, id_str in expanded_items:
-            if id_str == item_id:
-                return item
-        return None
+    """
+    Optimiseur 3D (cm/kg).
+    - Heuristique: Extreme Points + Best Fit + rotations
+    - GA: seed avec solution heuristique pour convergence rapide
+    """
 
+    def optimize(self, items: List[Item], truck: TruckSpecs, config: AlgorithmConfig):
+        config = config or AlgorithmConfig()
+        # Normaliser + déplier unités
+        units = self._expand_items(items, allow_rotation=config.allow_rotation)
+        # tri Project Cargo: volume puis poids
+        units.sort(key=lambda u: (u.volume_cm3, u.weight), reverse=True)
+
+        if not units:
+            return self._result(truck, [], 0, 0)
+
+        if config.algorithm.lower() == "simple":
+            placements = self._optimize_simple(units, truck, config)
+        else:
+            placements = self._optimize_genetic(units, truck, config)
+
+        placed_ids = {p.item_id for p in placements}
+        return self._result(truck, placements, len(placed_ids), len(units))
+
+    # ---------------------------
+    # Core: Heuristic (Extreme Points)
+    # ---------------------------
+    def _optimize_simple(self, units: List[Item], truck: TruckSpecs, config: AlgorithmConfig) -> List[Placement]:
+        placements: List[Placement] = []
+        placed = set()
+
+        max_height = truck.height * float(config.max_height_ratio)
+
+        for u in units:
+            if u.id in placed:
+                continue
+
+            best = self._find_best_position(u, placements, truck, config, max_height)
+            if best is None:
+                continue
+
+            x, y, z, L, W, H = best
+            placements.append(Placement(
+                item_id=u.id,
+                x=x, y=y, z=z,
+                length=L, width=W, height=H,
+                weight=u.weight,
+                reference=u.reference,
+                stackable=u.stackable
+            ))
+            placed.add(u.id)
+
+        return placements
+
+    def _find_best_position(
+        self,
+        u: Item,
+        placements: List[Placement],
+        truck: TruckSpecs,
+        config: AlgorithmConfig,
+        max_height: float
+    ) -> Optional[Tuple[float, float, float, float, float, float]]:
+        """
+        Cherche la meilleure position selon "best-fit":
+        - essaye rotations
+        - essaie points extrêmes
+        - fallback sur grille fine
+        """
+        best_score = None
+        best_sol = None
+
+        for (L, W, H) in u.rotations(config.allow_rotation):
+            # Check bounding
+            if L + config.clearance_cm > truck.length or W + config.clearance_cm > truck.width:
+                continue
+            if H > max_height:
+                continue
+
+            # 1) Extreme points
+            for (x, y, z) in self._candidate_points(placements, config):
+                if x + L + config.clearance_cm > truck.length:
+                    continue
+                if y + W + config.clearance_cm > truck.width:
+                    continue
+                if z + H > max_height:
+                    continue
+                if self._collides(x, y, z, L, W, H, placements, config):
+                    continue
+                if not self._supported(x, y, z, L, W, placements, config, u.stackable):
+                    continue
+
+                score = self._score_position(x, y, z, L, W, H, placements)
+                if best_score is None or score < best_score:
+                    best_score, best_sol = score, (x, y, z, L, W, H)
+
+            # 2) fallback grid
+            step = max(1, int(config.grid_step_cm))
+            for x in range(0, int(truck.length - L) + 1, step):
+                for y in range(0, int(truck.width - W) + 1, step):
+                    # try z=0 then z candidates
+                    for z in self._z_levels(placements):
+                        if z + H > max_height:
+                            continue
+                        if self._collides(x, y, z, L, W, H, placements, config):
+                            continue
+                        if not self._supported(x, y, z, L, W, placements, config, u.stackable):
+                            continue
+
+                        score = self._score_position(x, y, z, L, W, H, placements)
+                        if best_score is None or score < best_score:
+                            best_score, best_sol = score, (x, y, z, L, W, H)
+
+        return best_sol
+
+    def _candidate_points(self, placements: List[Placement], config: AlgorithmConfig) -> List[Tuple[float, float, float]]:
+        """
+        Extreme points:
+        - origin
+        - right of each placement
+        - front of each placement
+        - on top of each placement (z+H)
+        """
+        pts = {(0.0, 0.0, 0.0)}
+        c = float(config.clearance_cm)
+
+        for p in placements:
+            pts.add((p.x + p.length + c, p.y, p.z))
+            pts.add((p.x, p.y + p.width + c, p.z))
+            pts.add((p.x, p.y, p.z + p.height))  # vertical stacking candidate
+
+        # Tri: z d'abord (bas), puis y, puis x
+        out = list(pts)
+        out.sort(key=lambda t: (t[2], t[1], t[0]))
+        return out
+
+    def _z_levels(self, placements: List[Placement]) -> List[int]:
+        levels = {0}
+        for p in placements:
+            levels.add(int(round(p.z + p.height)))
+        out = sorted(levels)
+        return out
+
+    def _collides(self, x, y, z, L, W, H, placements: List[Placement], config: AlgorithmConfig) -> bool:
+        c = float(config.clearance_cm)
+        for p in placements:
+            if self._aabb_intersect(x, y, z, L, W, H, p.x, p.y, p.z, p.length, p.width, p.height, c):
+                return True
+        return False
+
+    def _aabb_intersect(self, ax, ay, az, aL, aW, aH, bx, by, bz, bL, bW, bH, clearance: float) -> bool:
+        # collision avec marge (clearance)
+        return not (
+            ax + aL + clearance <= bx or
+            bx + bL + clearance <= ax or
+            ay + aW + clearance <= by or
+            by + bW + clearance <= ay or
+            az + aH <= bz or
+            bz + bH <= az
+        )
+
+    def _supported(self, x, y, z, L, W, placements: List[Placement], config: AlgorithmConfig, stackable: bool) -> bool:
+        """
+        Support:
+          - au sol => ok
+          - sinon => doit être supporté à min_support_ratio
+          - interdit d'empiler sur un élément non stackable
+        """
+        if z <= 0.0:
+            return True
+
+        # surface requise
+        need = (L * W) * float(config.min_support_ratio)
+        supported = 0.0
+
+        # vérifier supports à la même hauteur (z==p.z+p.height)
+        for p in placements:
+            top = p.z + p.height
+            if abs(top - z) > 1e-6:
+                continue
+
+            # interdit si support non stackable (on ne charge pas au-dessus)
+            if not p.stackable:
+                # si overlap, interdit direct
+                if self._overlap_area(x, y, L, W, p.x, p.y, p.length, p.width) > 0:
+                    return False
+
+            supported += self._overlap_area(x, y, L, W, p.x, p.y, p.length, p.width)
+
+        return supported + 1e-9 >= need if stackable else False
+
+    def _overlap_area(self, ax, ay, aL, aW, bx, by, bL, bW) -> float:
+        ix1 = max(ax, bx)
+        iy1 = max(ay, by)
+        ix2 = min(ax + aL, bx + bL)
+        iy2 = min(ay + aW, by + bW)
+        if ix2 <= ix1 or iy2 <= iy1:
+            return 0.0
+        return (ix2 - ix1) * (iy2 - iy1)
+
+    def _score_position(self, x, y, z, L, W, H, placements: List[Placement]) -> float:
+        """
+        Score: on minimise
+        - z en priorité (stabilité)
+        - puis distance à l'origine
+        - puis "compacité" (max extent)
+        """
+        if not placements:
+            return z * 1e6 + x + y
+
+        maxX = max((p.x + p.length) for p in placements)
+        maxY = max((p.y + p.width) for p in placements)
+        maxZ = max((p.z + p.height) for p in placements)
+
+        newMaxX = max(maxX, x + L)
+        newMaxY = max(maxY, y + W)
+        newMaxZ = max(maxZ, z + H)
+
+        dist = x + y + (z * 10.0)
+        compact = (newMaxX * 0.5) + (newMaxY * 0.5) + (newMaxZ * 2.0)
+        return (z * 1e6) + dist + compact
+
+    # ---------------------------
+    # Genetic algorithm (seeded)
+    # ---------------------------
+    def _optimize_genetic(self, units: List[Item], truck: TruckSpecs, config: AlgorithmConfig) -> List[Placement]:
+        start = time.time()
+        timeout = max(10, int(config.timeout_seconds))
+
+        # seed with heuristic
+        seed = self._optimize_simple(units, truck, AlgorithmConfig(
+            algorithm="simple",
+            grid_step_cm=config.grid_step_cm,
+            allow_rotation=config.allow_rotation,
+            min_support_ratio=config.min_support_ratio,
+            clearance_cm=config.clearance_cm,
+            max_height_ratio=config.max_height_ratio
+        ))
+
+        def fitness(placements: List[Placement]) -> float:
+            # maximise placed count, then weight, then volume used
+            placed = len({p.item_id for p in placements})
+            w = sum(p.weight for p in placements)
+            vol = sum(p.length * p.width * p.height for p in placements)  # cm3
+            return placed * 1e9 + w * 1e3 + vol
+
+        population: List[List[Placement]] = []
+        population.append(seed)
+
+        # random individuals: shuffle order
+        for _ in range(max(0, config.population_size - 1)):
+            perm = units[:]
+            random.shuffle(perm)
+            population.append(self._optimize_simple(perm, truck, config))
+
+        best = max(population, key=fitness)
+
+        for gen in range(config.generations):
+            if time.time() - start > timeout:
+                break
+
+            population.sort(key=fitness, reverse=True)
+            elite_count = max(1, int(config.elitism_rate * len(population)))
+            new_pop = population[:elite_count]
+
+            # breed
+            while len(new_pop) < config.population_size:
+                p1 = self._tournament(population, fitness)
+                p2 = self._tournament(population, fitness)
+                child_units = self._crossover_units(units, p1, p2, config)
+                if random.random() < config.mutation_rate:
+                    random.shuffle(child_units)
+                child = self._optimize_simple(child_units, truck, config)
+                new_pop.append(child)
+
+            population = new_pop
+            current_best = max(population, key=fitness)
+            if fitness(current_best) > fitness(best):
+                best = current_best
+
+        return best
+
+    def _tournament(self, population: List[List[Placement]], fitness_fn, k: int = 3) -> List[Placement]:
+        sample = random.sample(population, min(k, len(population)))
+        return max(sample, key=fitness_fn)
+
+    def _crossover_units(self, original_units: List[Item], p1: List[Placement], p2: List[Placement], config: AlgorithmConfig) -> List[Item]:
+        """
+        Crossover sur l'ordre des items: on prend un sous-ensemble d'items placés de p1,
+        puis on complète avec l'ordre d'origine et/ou p2.
+        """
+        placed1 = {pl.item_id for pl in p1}
+        placed2 = {pl.item_id for pl in p2}
+
+        take = set()
+        for u in original_units:
+            if u.id in placed1 and random.random() < 0.6:
+                take.add(u.id)
+            elif u.id in placed2 and random.random() < 0.3:
+                take.add(u.id)
+
+        head = [u for u in original_units if u.id in take]
+        tail = [u for u in original_units if u.id not in take]
+        return head + tail
+
+    # ---------------------------
+    # Helpers
+    # ---------------------------
+    def _expand_items(self, items: List[Item], allow_rotation: bool) -> List[Item]:
+        """
+        Déplie quantity => items unitaires,
+        et utilise un séparateur sûr REF__idx pour éviter bugs avec underscores.
+        Si l'item a déjà quantity=1 et un id unique, on le garde tel quel.
+        """
+        units: List[Item] = []
+        seen_ids = set()
+        
+        for it in items or []:
+            itn = it.normalized()
+            ref = itn.reference or itn.id or "ITEM"
+            qty = max(1, itn.quantity)
+            
+            # Si quantity=1 et l'item a déjà un id unique (déjà déplié par fleet_optimizer)
+            if qty == 1 and itn.id and itn.id not in seen_ids:
+                seen_ids.add(itn.id)
+                units.append(Item(
+                    length=itn.length, width=itn.width, height=itn.height,
+                    weight=itn.weight, quantity=1,
+                    id=itn.id, reference=ref, description=itn.description,
+                    fragile=itn.fragile, stackable=itn.stackable
+                ))
+            else:
+                # Déplier selon quantity
+                for k in range(qty):
+                    uid = f"{ref}__{k+1}"
+                    # S'assurer que l'id est unique
+                    while uid in seen_ids:
+                        uid = f"{ref}__{k+1}_{len(seen_ids)}"
+                    seen_ids.add(uid)
+                    units.append(Item(
+                        length=itn.length, width=itn.width, height=itn.height,
+                        weight=itn.weight, quantity=1,
+                        id=uid, reference=ref, description=itn.description,
+                        fragile=itn.fragile, stackable=itn.stackable
+                    ))
+        return units
+
+    def _result(self, truck: TruckSpecs, placements: List[Placement], placed: int, total: int) -> Dict[str, Any]:
+        total_weight = sum(p.weight for p in placements)
+        total_vol_cm3 = sum(p.length * p.width * p.height for p in placements)
+
+        weight_eff = (total_weight / truck.max_weight) if truck.max_weight > 0 else 0.0
+        vol_eff = (total_vol_cm3 / truck.volume_cm3) if truck.volume_cm3 > 0 else 0.0
+
+        return {
+            "truck_specs": {
+                "length": truck.length,
+                "width": truck.width,
+                "height": truck.height,
+                "max_weight": truck.max_weight,
+                "id": truck.id,
+                "name": truck.name,
+                "volume_m3": truck.volume_m3
+            },
+            "items_total": total,
+            "items_placed": placed,
+            "weight_efficiency": round(weight_eff * 100, 2),
+            "volume_efficiency": round(vol_eff * 100, 2),
+            "placements": [p.to_dict() for p in placements],
+        }

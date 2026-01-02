@@ -1,412 +1,234 @@
-"""
-Module d'optimisation de flotte multi-camions - Version Améliorée
-Intègre les corrections de Gemini/ChatGPT pour un calcul réaliste
-"""
+# src/services/fleet_optimizer.py
+from __future__ import annotations
 
-import random
-import copy
+from typing import List, Dict, Any, Tuple
 import math
-from typing import List, Dict, Tuple
-from src.models.item import Item
-from src.services.cost_calculator import CostCalculator
+
+from src.models.item import Item, TruckSpecs, calculate_statistics
+
 
 class FleetOptimizer:
-    """Optimiseur de flotte avec calcul réaliste du remplissage"""
-    
-    # Facteur d'efficacité de chargement (15% de perte d'espace estimée)
-    # Un camion n'est jamais rempli à plus de 85% à cause des formes des caisses
-    PACKING_EFFICIENCY_FACTOR = 0.85
-    
-    # Destinations et distances depuis Dakar (en km)
-    DESTINATIONS = {
-        "dakar_local": {"name": "Dakar (Local)", "distance": 100, "multiplier": 1.0},
-        "thies": {"name": "Thiès", "distance": 70, "multiplier": 1.1},
-        "saint_louis": {"name": "Saint-Louis", "distance": 270, "multiplier": 1.3},
-        "kaolack": {"name": "Kaolack", "distance": 190, "multiplier": 1.2},
-        "bamako": {"name": "Bamako (Mali)", "distance": 1250, "multiplier": 2.5},
-        "tambacounda": {"name": "Tambacounda", "distance": 460, "multiplier": 1.5}
-    }
+    """
+    Pré-dimensionnement flotte + allocation items -> camions.
+    Objectif: proposer des scénarios réalistes (project cargo) avant le 3D.
+    """
 
-    # Spécifications des camions avec surface au sol (floor_area en m²)
-    TRUCK_SPECS = {
-        "heavy_modular": {
-            "name": "Convoi Exceptionnel (Remorque Modulaire)",
-            "length": 1500, "width": 300, "height": 350,
-            "max_weight": 100000, 
-            "volume": 157.5,  # 15m x 3m x 3.5m
-            "floor_area": 45.0,  # 15m x 3m
-            "base_cost": 1500000
-        },
-        "truck_40t": {
-            "name": "Camion 40 tonnes (Semi-remorque)",
-            "length": 1360, "width": 248, "height": 270,
-            "max_weight": 40000, 
-            "volume": 91.06,
-            "floor_area": 33.7,  # 13.6m x 2.48m
-            "base_cost": 300000
-        },
-        "truck_26t": {
-            "name": "Camion 26 tonnes",
-            "length": 1200, "width": 248, "height": 270,
-            "max_weight": 26000, 
-            "volume": 80.35,
-            "floor_area": 29.7,  # 12m x 2.48m
-            "base_cost": 200000
-        },
-        "truck_19t": {
-            "name": "Camion 19 tonnes (Porteur)",
-            "length": 850, "width": 245, "height": 260,
-            "max_weight": 19000, 
-            "volume": 54.0,
-            "floor_area": 20.8,  # 8.5m x 2.45m
-            "base_cost": 150000
-        },
-        "van_3t5": {
-            "name": "Camionnette 3.5 tonnes",
-            "length": 420, "width": 200, "height": 200,
-            "max_weight": 3500, 
-            "volume": 16.8,
-            "floor_area": 8.4,  # 4.2m x 2m
-            "base_cost": 50000
-        }
-    }
-    
-    def __init__(self, items: List[Item], destination: str = "dakar_local", 
-                 available_trucks: List[str] = None, distance_km: float = None,
-                 constraints: dict = None):
-        self.items = items
-        self.dest_key = destination if destination in self.DESTINATIONS else "dakar_local"
-        self.destination = self.DESTINATIONS[self.dest_key]
-        self.distance_km = distance_km if distance_km is not None else self.destination["distance"]
-        self.available_trucks = available_trucks or list(self.TRUCK_SPECS.keys())
-        self.constraints = constraints or {}
-        self.cost_calculator = CostCalculator()
-        self.analysis = self._analyze_items()
-    
-    def _analyze_items(self) -> dict:
-        """Analyse détaillée incluant la surface au sol requise"""
-        total_volume = 0
-        total_weight = 0
-        required_floor_area = 0  # Surface au sol pour non-gerbables
-        
-        max_dims = {"length": 0, "width": 0, "height": 0}
-        max_single_weight = 0
-        oversized_count = 0
-        heavy_count = 0
-        
-        for item in self.items:
-            # Volume en m³
-            vol = (item.length * item.width * item.height) / 1_000_000
-            total_volume += vol * item.quantity
-            total_weight += item.weight * item.quantity
-            
-            # Calcul surface au sol (m²)
-            floor_item = (item.length * item.width) / 10_000
-            
-            # Vérifier si l'article est gerbable
-            is_stackable = getattr(item, 'stackable', True)
-            
-            if not is_stackable:
-                # Si non gerbable, on prend toute la surface
-                required_floor_area += floor_item * item.quantity
-            else:
-                # Si gerbable, on estime qu'on peut empiler sur 2 niveaux en moyenne
-                required_floor_area += (floor_item * item.quantity) / 2.0
+    def __init__(self, available_trucks: List[TruckSpecs]):
+        self.available_trucks = available_trucks or []
 
-            # Mise à jour des dimensions max
-            max_dims["length"] = max(max_dims["length"], item.length)
-            max_dims["width"] = max(max_dims["width"], item.width)
-            max_dims["height"] = max(max_dims["height"], item.height)
-            max_single_weight = max(max_single_weight, item.weight)
-            
-            # Comptage des articles spéciaux
-            if item.length > 1200 or item.width > 240 or item.height > 270:
-                oversized_count += item.quantity
-            if item.weight > 5000:
-                heavy_count += item.quantity
-            
+    def suggest_scenarios(self, items: List[Item], distance_km: float = 0.0) -> List[Dict[str, Any]]:
+        items = [i.normalized() for i in (items or [])]
+        stats = calculate_statistics(items)
+
+        compatible_trucks = self._filter_compatible_trucks(items, self.available_trucks)
+        if not compatible_trucks:
+            return [{
+                "id": "no_solution",
+                "name": "Aucun camion compatible",
+                "error": "Items dépassent les capacités dimensionnelles / poids des camions disponibles.",
+                "statistics": stats.__dict__,
+                "trucks": [],
+                "total_cost_fcfa": None
+            }]
+
+        # Scénario 1: coût (efficacité FCFA)
+        cost_sorted = sorted(compatible_trucks, key=lambda t: self._truck_cost_score(t, distance_km))
+        s1 = self._build_scenario("cost_opt", "Optimisation coût", items, cost_sorted, distance_km, stats)
+
+        # Scénario 2: minimiser nb camions (volume décroissant puis charge utile)
+        cap_sorted = sorted(compatible_trucks, key=lambda t: (t.volume_m3, t.max_weight), reverse=True)
+        s2 = self._build_scenario("min_trucks", "Minimum camions", items, cap_sorted, distance_km, stats)
+
+        # Scénario 3: "équilibré" (mix 26T puis 19T)
+        mix = sorted(compatible_trucks, key=lambda t: (self._class_rank(t.id), -t.volume_m3))
+        s3 = self._build_scenario("balanced", "Équilibré", items, mix, distance_km, stats)
+
+        # Reco: coût minimal (si coûts fournis)
+        scenarios = [s1, s2, s3]
+        with_cost = [s for s in scenarios if isinstance(s.get("total_cost_fcfa"), (int, float))]
+        if with_cost:
+            best = min(with_cost, key=lambda s: s["total_cost_fcfa"])
+            best["recommended"] = True
+
+        return scenarios
+
+    # -------------------------
+    # Scenario builder
+    # -------------------------
+    def _build_scenario(self, sid: str, name: str, items: List[Item], truck_priority: List[TruckSpecs], distance_km: float, stats) -> Dict[str, Any]:
+        allocation = self._allocate(items, truck_priority)
+
+        total_cost = 0.0
+        for t in allocation:
+            ts = TruckSpecs.from_dict(t["truck_specs"])
+            total_cost += self._truck_cost(ts, distance_km)
+
         return {
-            "total_volume_m3": round(total_volume, 2),
-            "total_weight_kg": round(total_weight),
-            "total_weight_t": round(total_weight / 1000, 2),
-            "required_floor_m2": round(required_floor_area, 2),
-            "total_pieces": sum(item.quantity for item in self.items),
-            "max_dimensions": max_dims,
-            "max_single_weight": max_single_weight,
-            "oversized_items": oversized_count,
-            "heavy_items": heavy_count
+            "id": sid,
+            "name": name,
+            "statistics": stats.__dict__,
+            "trucks": allocation,
+            "total_cost_fcfa": round(total_cost, 0),
+            "recommended": False
         }
 
-    def _filter_compatible_trucks(self) -> List[str]:
-        """Filtre les camions capables de transporter le plus gros colis"""
-        compatible = []
-        md = self.analysis['max_dimensions']
-        mw = self.analysis['max_single_weight']
-        
-        for t_name in self.available_trucks:
-            if t_name not in self.TRUCK_SPECS:
-                continue
-            spec = self.TRUCK_SPECS[t_name]
-            # Vérification dimensions physiques (avec marge 2cm)
-            if (spec['length'] >= md['length'] - 2 and 
-                spec['width'] >= md['width'] - 2 and 
-                spec['height'] >= md['height'] - 2 and 
-                spec['max_weight'] >= mw):
-                compatible.append(t_name)
-                
-        return compatible if compatible else list(self.TRUCK_SPECS.keys())
+    def _allocate(self, items: List[Item], truck_priority: List[TruckSpecs]) -> List[Dict[str, Any]]:
+        # Déplier items unitaires
+        units = []
+        for it in items:
+            itn = it.normalized()
+            ref = itn.reference or itn.id or "ITEM"
+            for k in range(max(1, itn.quantity)):
+                units.append(Item(
+                    length=itn.length, width=itn.width, height=itn.height,
+                    weight=itn.weight, quantity=1,
+                    id=f"{ref}__{k+1}", reference=ref,
+                    description=itn.description, fragile=itn.fragile, stackable=itn.stackable
+                ))
+        # Tri "terrain"
+        units.sort(key=lambda u: (u.volume_cm3, u.weight), reverse=True)
 
-    def _allocate_items_to_trucks(self, truck_priority: List[str]) -> List[dict]:
-        """
-        Allocation avec liste détaillée des articles par camion
-        Utilise le facteur d'efficacité et vérifie volume, poids ET surface au sol
-        """
-        # Préparer la liste plate de tous les articles
-        all_items = []
-        for item in self.items:
-            for i in range(item.quantity):
-                is_stackable = getattr(item, 'stackable', True)
-                all_items.append({
-                    "id": f"{getattr(item, 'reference', item.id) if hasattr(item, 'reference') else item.id}_{i+1}",
-                    "name": item.description,
-                    "length": item.length,
-                    "width": item.width,
-                    "height": item.height,
-                    "weight": item.weight,
-                    "volume": (item.length * item.width * item.height) / 1_000_000,
-                    "floor_area": (item.length * item.width) / 10_000,
-                    "stackable": is_stackable
-                })
-        
-        # Trier les articles : d'abord les plus lourds et les plus volumineux
-        all_items.sort(key=lambda x: (x['weight'], x['volume']), reverse=True)
-        
-        trucks_needed = []
-        
-        while all_items:
-            # Choisir le type de camion
-            best_truck_type = None
-            for t_type in truck_priority:
-                if t_type in self.TRUCK_SPECS:
-                    best_truck_type = t_type
-                    break
-            
-            if not best_truck_type:
-                best_truck_type = "heavy_modular"
-            
-            spec = self.TRUCK_SPECS[best_truck_type]
-            
-            # Capacités RÉELLES avec facteur d'efficacité
-            real_vol_cap = spec['volume'] * self.PACKING_EFFICIENCY_FACTOR
-            real_weight_cap = spec['max_weight'] * 0.95  # 5% marge sécurité poids
-            real_floor_cap = spec.get('floor_area', spec['volume'] / 3) * 0.9  # 10% perte surface sol
-            
-            current_truck_items = []
-            current_vol = 0
-            current_weight = 0
-            current_floor = 0
-            
-            # Prendre le premier article (le plus lourd/volumineux)
-            if all_items:
-                first_item = all_items[0]
-                
-                # Si l'article est trop lourd pour le camion choisi, forcer un convoi exceptionnel
-                if first_item['weight'] > spec['max_weight'] * 0.95:
-                    if best_truck_type != "heavy_modular" and "heavy_modular" in self.available_trucks:
-                        truck_priority = ["heavy_modular"] + [t for t in truck_priority if t != "heavy_modular"]
+        trucks_out = []
+        remaining = units[:]
+
+        # allocation itérative
+        while remaining:
+            placed_any = False
+            for spec in truck_priority:
+                # si le plus gros item ne peut pas rentrer, skip
+                if not self._can_fit_max_item(remaining[0], spec):
+                    continue
+
+                bucket = []
+                vol_used = 0.0
+                w_used = 0.0
+                floor_used = 0.0
+
+                # marges (réalisme)
+                vol_cap = spec.volume_m3 * 0.88
+                w_cap = spec.max_weight * 0.95
+                floor_cap = spec.floor_area_m2 * 0.90
+
+                new_remaining = []
+                for u in remaining:
+                    u_vol = u.volume_m3
+                    u_floor = (u.footprint_cm2 / 10_000.0) * (1.0 if not u.stackable else 0.35)
+
+                    # garde-fous dimensions (project cargo)
+                    if not self._can_fit_max_item(u, spec):
+                        new_remaining.append(u)
                         continue
-                
-                # Ajouter le premier article
-                all_items.pop(0)
-                current_truck_items.append(first_item)
-                current_vol += first_item['volume']
-                current_weight += first_item['weight']
-                if first_item['stackable']:
-                    current_floor += first_item['floor_area'] / 2
-                else:
-                    current_floor += first_item['floor_area']
-            
-            # Essayer d'ajouter d'autres articles
-            i = 0
-            while i < len(all_items):
-                item = all_items[i]
-                item_floor = item['floor_area'] if not item['stackable'] else item['floor_area'] / 2
-                
-                # Vérifier les 3 contraintes : volume, poids ET surface au sol
-                if (current_vol + item['volume'] <= real_vol_cap and 
-                    current_weight + item['weight'] <= real_weight_cap and
-                    current_floor + item_floor <= real_floor_cap):
-                    
-                    current_truck_items.append(all_items.pop(i))
-                    current_vol += item['volume']
-                    current_weight += item['weight']
-                    current_floor += item_floor
-                else:
-                    i += 1
-            
-            # Calculer les taux de remplissage réels
-            vol_fill_rate = current_vol / spec['volume'] if spec['volume'] > 0 else 0
-            weight_fill_rate = current_weight / spec['max_weight'] if spec['max_weight'] > 0 else 0
-            floor_fill_rate = current_floor / spec.get('floor_area', 1) if spec.get('floor_area', 1) > 0 else 0
-            
-            trucks_needed.append({
-                "type": best_truck_type,
-                "name": spec["name"],
-                "items": current_truck_items,
-                "items_assigned": len(current_truck_items),
-                "item_count": len(current_truck_items),
-                "volume_used": round(current_vol, 2),
-                "weight_used": round(current_weight),
-                "floor_used": round(current_floor, 2),
-                "volume_capacity": spec['volume'],
-                "weight_capacity": spec['max_weight'],
-                "floor_capacity": spec.get('floor_area', 0),
-                "volume_fill_rate": round(vol_fill_rate, 2),
-                "weight_fill_rate": round(weight_fill_rate, 2),
-                "floor_fill_rate": round(floor_fill_rate, 2),
-                "fill_rate": round(max(vol_fill_rate, weight_fill_rate, floor_fill_rate), 2)
-            })
-            
-            # Sécurité : éviter boucle infinie
-            if len(trucks_needed) > 50:
+
+                    if (vol_used + u_vol <= vol_cap) and (w_used + u.weight <= w_cap) and (floor_used + u_floor <= floor_cap):
+                        bucket.append(u)
+                        vol_used += u_vol
+                        w_used += u.weight
+                        floor_used += u_floor
+                        placed_any = True
+                    else:
+                        new_remaining.append(u)
+
+                if bucket:
+                    trucks_out.append({
+                        "truck_specs": {
+                            "id": spec.id,
+                            "name": spec.name,
+                            "length": spec.length,
+                            "width": spec.width,
+                            "height": spec.height,
+                            "max_weight": spec.max_weight,
+                            "base_cost_fcfa": spec.base_cost_fcfa,
+                            "cost_per_km_fcfa": spec.cost_per_km_fcfa,
+                            "volume_m3": spec.volume_m3,
+                            "floor_area_m2": spec.floor_area_m2
+                        },
+                        "items": [b.to_dict() for b in bucket],
+                        "metrics": {
+                            "weight_kg": round(w_used, 2),
+                            "volume_m3": round(vol_used, 4),
+                            "floor_area_m2": round(floor_used, 4),
+                            "fill_weight_pct": round((w_used / spec.max_weight) * 100, 2) if spec.max_weight > 0 else 0.0,
+                            "fill_volume_pct": round((vol_used / spec.volume_m3) * 100, 2) if spec.volume_m3 > 0 else 0.0,
+                            "fill_floor_pct": round((floor_used / spec.floor_area_m2) * 100, 2) if spec.floor_area_m2 > 0 else 0.0,
+                        }
+                    })
+                    remaining = new_remaining
+                    break
+
+            if not placed_any:
+                # Impossible de placer le reste: convoi exceptionnel / specs manquantes
+                # On renvoie un camion "exception" pour ne pas boucler
+                trucks_out.append({
+                    "truck_specs": {
+                        "id": "exception",
+                        "name": "Convoi exceptionnel / étude manuelle requise",
+                        "length": 0, "width": 0, "height": 0, "max_weight": 0
+                    },
+                    "items": [r.to_dict() for r in remaining],
+                    "metrics": {
+                        "reason": "Remaining items exceed available truck constraints"
+                    }
+                })
                 break
 
-        # Grouper pour le résumé
-        summary = {}
-        for t in trucks_needed:
-            t_type = t["type"]
-            if t_type not in summary:
-                summary[t_type] = {
-                    "type": t_type,
-                    "name": t["name"],
-                    "quantity": 0,
-                    "trucks_details": [],
-                    "total_items": 0
-                }
-            summary[t_type]["quantity"] += 1
-            summary[t_type]["trucks_details"].append(t)
-            summary[t_type]["total_items"] += t["item_count"]
-            
-        return list(summary.values())
+        return trucks_out
 
-    def suggest_scenarios(self) -> dict:
-        """Génère plusieurs scénarios d'optimisation"""
-        compatible_trucks = self._filter_compatible_trucks()
-        
-        scenarios = []
-        
-        # Scénario 1 : Optimisation coût (camions moyens)
-        cost_priority = self._sort_trucks_by_efficiency(compatible_trucks)
-        scenario_cost = self._generate_scenario(
-            cost_priority, 
-            "scenario_cost_optimal", 
-            "Coût Optimal",
-            "Minimise le coût total en optimisant le rapport coût/capacité"
-        )
-        if scenario_cost:
-            scenarios.append(scenario_cost)
-        
-        # Scénario 2 : Nombre minimal de camions (plus gros camions)
-        volume_priority = sorted(compatible_trucks, 
-                                  key=lambda t: self.TRUCK_SPECS.get(t, {}).get('volume', 0), 
-                                  reverse=True)
-        scenario_min = self._generate_scenario(
-            volume_priority, 
-            "scenario_min_trucks", 
-            "Nombre Minimal de Camions",
-            "Utilise le moins de camions possible en maximisant le remplissage"
-        )
-        if scenario_min:
-            scenarios.append(scenario_min)
-        
-        # Identifier le scénario recommandé (le moins cher)
-        recommended_id = None
-        if scenarios:
-            best = min(scenarios, key=lambda s: s.get('total_cost', float('inf')))
-            recommended_id = best['id']
-        
-        return {
-            "success": True,
-            "scenarios": scenarios,
-            "recommended_scenario": recommended_id,
-            "analysis": self.analysis,
-            "compatible_trucks": compatible_trucks,
-            "destinations_available": list(self.DESTINATIONS.values())
-        }
-    
-    def _sort_trucks_by_efficiency(self, trucks: List[str]) -> List[str]:
-        """Trie les camions par efficacité coût/capacité"""
-        truck_efficiency = []
-        for truck_type in trucks:
-            if truck_type not in self.TRUCK_SPECS:
+    # -------------------------
+    # Compatibility / costs
+    # -------------------------
+    def _filter_compatible_trucks(self, items: List[Item], trucks: List[TruckSpecs]) -> List[TruckSpecs]:
+        if not trucks:
+            return []
+        maxL = max(i.length for i in items)
+        maxW = max(i.width for i in items)
+        maxH = max(i.height for i in items)
+        maxWt = max(i.weight for i in items)
+
+        out = []
+        for t in trucks:
+            # dimension: on tolère rotation L/W, mais pas sur hauteur
+            dim_ok = ((maxL <= t.length and maxW <= t.width) or (maxW <= t.length and maxL <= t.width))
+            if not dim_ok:
                 continue
-            spec = self.TRUCK_SPECS[truck_type]
-            # Estimer le coût total pour ce trajet
-            per_km_rate = 800 if truck_type == "heavy_modular" else 500
-            total_cost = spec['base_cost'] + (self.distance_km * per_km_rate)
-            efficiency = spec['volume'] / total_cost if total_cost > 0 else 0
-            truck_efficiency.append((truck_type, efficiency))
-        
-        truck_efficiency.sort(key=lambda x: x[1], reverse=True)
-        return [t[0] for t in truck_efficiency]
-    
-    def _generate_scenario(self, truck_priority: List[str], scenario_id: str, 
-                           name: str, description: str) -> dict:
-        """Génère un scénario complet avec coûts"""
-        truck_groups = self._allocate_items_to_trucks(truck_priority)
-        
-        if not truck_groups:
-            return None
-        
-        # Calcul des coûts
-        total_cost = 0
-        cost_breakdown = []
-        
-        for group in truck_groups:
-            spec = self.TRUCK_SPECS.get(group["type"], {})
-            per_km_rate = 800 if group["type"] == "heavy_modular" else 500
-            base_cost = spec.get("base_cost", 100000)
-            unit_cost = (base_cost + (self.distance_km * per_km_rate)) * self.destination["multiplier"]
-            group_cost = unit_cost * group["quantity"]
-            total_cost += group_cost
-            
-            cost_breakdown.append({
-                "truck_type": group["name"],
-                "quantity": group["quantity"],
-                "unit_cost": round(unit_cost),
-                "total": round(group_cost)
-            })
-        
-        total_trucks = sum(g["quantity"] for g in truck_groups)
-        
-        # Calculer le taux de remplissage moyen
-        all_fill_rates = []
-        for group in truck_groups:
-            for truck in group.get("trucks_details", []):
-                all_fill_rates.append(truck.get("fill_rate", 0))
-        avg_fill_rate = sum(all_fill_rates) / len(all_fill_rates) if all_fill_rates else 0
-        
-        # Warnings
-        warnings = []
-        if avg_fill_rate > 0.95:
-            warnings.append("Taux de remplissage très élevé - marge de sécurité réduite")
-        if self.analysis.get("oversized_items", 0) > 0:
-            warnings.append(f"{self.analysis['oversized_items']} article(s) surdimensionné(s)")
-        if self.analysis.get("heavy_items", 0) > 0:
-            warnings.append(f"{self.analysis['heavy_items']} article(s) très lourd(s) (>5T)")
-        
-        return {
-            "id": scenario_id,
-            "name": f"{name} vers {self.destination['name']}",
-            "description": description,
-            "trucks": truck_groups,
-            "total_trucks": total_trucks,
-            "total_cost": round(total_cost),
-            "cost_breakdown": cost_breakdown,
-            "average_fill_rate": round(avg_fill_rate, 2),
-            "destination": self.destination,
-            "distance_km": self.distance_km,
-            "warnings": warnings,
-            "legal_compliance": True,
-            "estimated_duration_days": 1 + (total_trucks * 0.2)
-        }
+            if maxH > t.height:
+                continue
+            if maxWt > t.max_weight:
+                continue
+            out.append(t)
+        return out
+
+    def _can_fit_max_item(self, item: Item, truck: TruckSpecs) -> bool:
+        # rotation L/W autorisée
+        dim_ok = ((item.length <= truck.length and item.width <= truck.width) or
+                  (item.width <= truck.length and item.length <= truck.width))
+        if not dim_ok:
+            return False
+        if item.height > truck.height:
+            return False
+        if item.weight > truck.max_weight:
+            return False
+        return True
+
+    def _truck_cost(self, t: TruckSpecs, distance_km: float) -> float:
+        return float(t.base_cost_fcfa or 0) + float(t.cost_per_km_fcfa or 0) * float(distance_km or 0)
+
+    def _truck_cost_score(self, t: TruckSpecs, distance_km: float) -> float:
+        # score coût par m3 utile (lower is better)
+        cost = self._truck_cost(t, distance_km)
+        cap = max(1e-9, t.volume_m3)
+        return cost / cap
+
+    def _class_rank(self, truck_id: str) -> int:
+        # ordre "terrain": 26t -> 19t -> 40t -> lowbed -> van
+        truck_id = (truck_id or "").lower()
+        if "26" in truck_id:
+            return 1
+        if "19" in truck_id:
+            return 2
+        if "40" in truck_id:
+            return 3
+        if "low" in truck_id or "45" in truck_id:
+            return 4
+        if "van" in truck_id:
+            return 5
+        return 9
