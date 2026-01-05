@@ -71,21 +71,42 @@ def upload():
 @optimization_bp.get("/truck-specs")
 def truck_specs():
     """
-    Presets cohérents (cm/kg) pour SODATRA (à adapter à votre flotte réelle).
+    Catalogue complet des camions disponibles en Afrique de l'Ouest.
+    Basé sur la réglementation UEMOA et les équipements réels.
     """
-    presets = {
-        "van_3t": {"id": "van_3t", "name": "Camionnette 3T", "length": 300, "width": 180, "height": 180, "max_weight": 3000,
-                   "base_cost_fcfa": 45000, "cost_per_km_fcfa": 350},
-        "truck_19t": {"id": "truck_19t", "name": "Porteur / Plateau 19T (12m)", "length": 1200, "width": 248, "height": 260, "max_weight": 19000,
-                      "base_cost_fcfa": 150000, "cost_per_km_fcfa": 650},
-        "truck_26t": {"id": "truck_26t", "name": "Semi / Plateau 26T (13.6m)", "length": 1360, "width": 248, "height": 260, "max_weight": 26000,
-                      "base_cost_fcfa": 220000, "cost_per_km_fcfa": 800},
-        "truck_40t": {"id": "truck_40t", "name": "Semi / Plateau 40T (13.6m)", "length": 1360, "width": 248, "height": 260, "max_weight": 40000,
-                      "base_cost_fcfa": 300000, "cost_per_km_fcfa": 950},
-        "lowbed_45t": {"id": "lowbed_45t", "name": "Porte-char Lowbed 45T", "length": 1100, "width": 300, "height": 350, "max_weight": 45000,
-                       "base_cost_fcfa": 350000, "cost_per_km_fcfa": 1200},
-    }
-    return jsonify({"success": True, "trucks": list(presets.values())})
+    from src.config.truck_catalog import get_standard_trucks
+    trucks = get_standard_trucks()
+    return jsonify({"success": True, "trucks": trucks})
+
+
+@optimization_bp.get("/truck-specs/all")
+def truck_specs_all():
+    """
+    Catalogue complet incluant les équipements de transport exceptionnel.
+    """
+    from src.config.truck_catalog import get_all_trucks
+    trucks = get_all_trucks()
+    return jsonify({"success": True, "trucks": trucks})
+
+
+@optimization_bp.get("/truck-specs/lowbeds")
+def truck_specs_lowbeds():
+    """
+    Lowbeds et équipements pour charges hors gabarit.
+    """
+    from src.config.truck_catalog import get_lowbeds
+    trucks = get_lowbeds()
+    return jsonify({"success": True, "trucks": trucks})
+
+
+@optimization_bp.get("/truck-specs/exceptional")
+def truck_specs_exceptional():
+    """
+    Équipements pour transport exceptionnel (lowbeds lourds, modulaires, SPMT).
+    """
+    from src.config.truck_catalog import get_exceptional_trucks
+    trucks = get_exceptional_trucks()
+    return jsonify({"success": True, "trucks": trucks})
 
 
 @optimization_bp.post("/optimize")
@@ -134,19 +155,15 @@ def suggest_fleet():
     run_3d = bool(data.get("run_3d", False))
     config = AlgorithmConfig.from_dict(data)
 
-    # Flotte disponible (peut être fourni par frontend, sinon presets)
+    # Flotte disponible (peut être fourni par frontend, sinon catalogue complet)
     trucks_payload = data.get("available_trucks")
     if trucks_payload:
         available_trucks = [TruckSpecs.from_dict(t) for t in trucks_payload]
     else:
-        # fallback: utilise presets de /truck-specs
-        presets = [
-            TruckSpecs.from_dict({"id": "truck_19t", "name": "Porteur 19T 12m", "length": 1200, "width": 248, "height": 260, "max_weight": 19000, "base_cost_fcfa": 150000, "cost_per_km_fcfa": 650}),
-            TruckSpecs.from_dict({"id": "truck_26t", "name": "Semi 26T 13.6m", "length": 1360, "width": 248, "height": 260, "max_weight": 26000, "base_cost_fcfa": 220000, "cost_per_km_fcfa": 800}),
-            TruckSpecs.from_dict({"id": "truck_40t", "name": "Semi 40T 13.6m", "length": 1360, "width": 248, "height": 260, "max_weight": 40000, "base_cost_fcfa": 300000, "cost_per_km_fcfa": 950}),
-            TruckSpecs.from_dict({"id": "lowbed_45t", "name": "Lowbed 45T", "length": 1100, "width": 300, "height": 350, "max_weight": 45000, "base_cost_fcfa": 350000, "cost_per_km_fcfa": 1200}),
-        ]
-        available_trucks = presets
+        # fallback: utilise le catalogue complet (standard + lowbeds + exceptionnels)
+        from src.config.truck_catalog import get_all_trucks
+        all_trucks = get_all_trucks()
+        available_trucks = [TruckSpecs.from_dict(t) for t in all_trucks]
 
     fleet = FleetOptimizer(available_trucks)
     scenarios = fleet.suggest_scenarios(items, distance_km=distance_km)

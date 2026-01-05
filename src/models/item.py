@@ -10,10 +10,20 @@ def _normalize_cm(v: float, is_truck: bool = False) -> float:
     """
     Normalise une dimension vers des centimètres.
     Heuristique robuste (très utile pour PL venant d'Excel / UI):
-      - Pour les items: v >= 1000 => probablement mm -> cm (x0.1)
-      - Pour les items: 0 < v <= 10 => probablement m -> cm (x100)
       - Pour les camions: on garde les valeurs telles quelles (déjà en cm)
-      - sinon => cm
+      - Pour les items: détection intelligente basée sur les plages réalistes
+    
+    Plages réalistes pour du cargo (en cm):
+      - Longueur: 10 - 1400 cm (0.1m - 14m)
+      - Largeur: 10 - 260 cm (0.1m - 2.6m)
+      - Hauteur: 10 - 300 cm (0.1m - 3m)
+    
+    Règles de conversion:
+      - v > 10000 => probablement mm, diviser par 10
+      - v > 2600 et v <= 10000 => probablement mm, diviser par 10
+      - v >= 100 et v <= 2600 => probablement cm, garder tel quel
+      - v >= 10 et v < 100 => ambigu, probablement cm
+      - v > 0 et v < 10 => probablement m, multiplier par 100
     """
     if v is None:
         return 0.0
@@ -22,16 +32,90 @@ def _normalize_cm(v: float, is_truck: bool = False) -> float:
     except Exception:
         return 0.0
     
+    if v <= 0:
+        return 0.0
+    
     # Pour les camions, on ne normalise pas (les specs sont déjà en cm)
     if is_truck:
         return v
     
-    # Pour les items, on applique l'heuristique
-    if v >= 1000:
-        return v * 0.1
-    if 0 < v <= 10:
-        return v * 100.0
-    return v
+    # Pour les items, détection intelligente
+    # Cas 1: Très grande valeur (> 10000) => certainement en mm
+    if v > 10000:
+        return v * 0.1  # mm -> cm
+    
+    # Cas 2: Grande valeur (2600 - 10000) => probablement en mm
+    # Car une dimension > 26m en cm serait irréaliste
+    if v > 2600:
+        return v * 0.1  # mm -> cm
+    
+    # Cas 3: Valeur moyenne (100 - 2600) => probablement en cm
+    # C'est la plage réaliste pour du cargo en cm
+    if v >= 100:
+        return v  # déjà en cm
+    
+    # Cas 4: Petite valeur (10 - 100) => ambigu, mais probablement cm
+    # 10-100 cm = 0.1-1m, réaliste pour petits colis
+    if v >= 10:
+        return v  # probablement cm
+    
+    # Cas 5: Très petite valeur (< 10) => probablement en mètres
+    # 0.1 - 10 m = 10 - 1000 cm
+    return v * 100.0  # m -> cm
+
+
+def _smart_normalize_item_dimensions(length: float, width: float, height: float) -> tuple:
+    """
+    Normalise les 3 dimensions d'un item de manière cohérente.
+    Analyse les 3 valeurs ensemble pour déterminer l'unité probable.
+    """
+    dims = [length, width, height]
+    
+    # Convertir en float
+    try:
+        dims = [float(d) if d else 0.0 for d in dims]
+    except:
+        return (0.0, 0.0, 0.0)
+    
+    # Filtrer les valeurs positives pour l'analyse
+    positive_dims = [d for d in dims if d > 0]
+    if not positive_dims:
+        return (0.0, 0.0, 0.0)
+    
+    max_dim = max(positive_dims)
+    min_dim = min(positive_dims)
+    
+    # Déterminer l'unité probable basée sur la plus grande dimension
+    # et la cohérence entre les dimensions
+    
+    # Si la plus grande dimension > 10000, c'est certainement en mm
+    if max_dim > 10000:
+        return tuple(d * 0.1 for d in dims)  # mm -> cm
+    
+    # Si la plus grande dimension > 1400, probablement en mm
+    # (car > 14m en cm serait irréaliste pour du cargo standard)
+    # Les plus grands camions font environ 12-14m de long
+    if max_dim > 1400:
+        return tuple(d * 0.1 for d in dims)  # mm -> cm
+    
+    # Si la plus grande dimension est entre 500 et 1400, vérifier la cohérence
+    # Si les dimensions semblent trop grandes pour du cargo (ex: 1500x1200x1000),
+    # c'est probablement en mm
+    if max_dim >= 500:
+        # Vérifier si les dimensions sont cohérentes avec du cargo en cm
+        # Un colis de 5m x 5m x 5m (500x500x500 cm) est déjà très grand
+        # Si toutes les dimensions sont > 500, c'est probablement en mm
+        large_dims = [d for d in positive_dims if d >= 500]
+        if len(large_dims) >= 2:
+            # Au moins 2 dimensions >= 500, probablement en mm
+            return tuple(d * 0.1 for d in dims)  # mm -> cm
+    
+    # Si toutes les dimensions sont < 10, probablement en mètres
+    if max_dim < 10 and min_dim > 0:
+        return tuple(d * 100.0 for d in dims)  # m -> cm
+    
+    # Sinon, probablement déjà en cm
+    return tuple(dims)
 
 
 @dataclass
@@ -51,11 +135,15 @@ class Item:
     stackable: bool = True  # si False => interdit d'empiler au-dessus
 
     def normalized(self) -> "Item":
-        """Retourne une copie normalisée en cm/kg."""
+        """Retourne une copie normalisée en cm/kg avec détection intelligente des unités."""
+        # Utiliser la normalisation intelligente qui analyse les 3 dimensions ensemble
+        norm_l, norm_w, norm_h = _smart_normalize_item_dimensions(
+            self.length, self.width, self.height
+        )
         return Item(
-            length=_normalize_cm(self.length),
-            width=_normalize_cm(self.width),
-            height=_normalize_cm(self.height),
+            length=norm_l,
+            width=norm_w,
+            height=norm_h,
             weight=float(self.weight or 0.0),
             quantity=max(1, int(self.quantity or 1)),
             id=str(self.id or self.reference or ""),
